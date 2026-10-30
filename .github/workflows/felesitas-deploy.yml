@@ -1,0 +1,96 @@
+# felesitas.cloud へのデプロイ
+#
+# Actions の「Run workflow」から動かす。aeronavis(検証環境)へ適用して確認し、
+# Environments「production」の承認を待ってから本番へ適用する。
+# GitHub のランナーは Tailscale(tag:ci)で一時的に tailnet へ入り、
+# ACL で許された tag:mastodon の SSH(22番)だけに入る。
+name: felesitas deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'デプロイするブランチ・タグ・コミット'
+        required: true
+        default: felesitas
+
+permissions:
+  contents: read
+
+concurrency:
+  group: felesitas-deploy
+  cancel-in-progress: false
+
+jobs:
+  aeronavis:
+    name: aeronavis へ適用
+    runs-on: ubuntu-latest
+    environment: aeronavis
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: felesitas
+          sparse-checkout: felesitas
+
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: SSH の準備
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: デプロイ
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
+          ssh -o StrictHostKeyChecking=yes root@aeronavis.taild6778a.ts.net \
+            'bash -s' -- "$REF" < felesitas/deploy.sh
+
+  production:
+    name: 本番へ適用
+    needs: aeronavis
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://felesitas.cloud
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: felesitas
+          sparse-checkout: felesitas
+
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: SSH の準備
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: デプロイ
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
+          ssh -o StrictHostKeyChecking=yes root@felesitas-prod.taild6778a.ts.net \
+            'bash -s' -- "$REF" < felesitas/deploy.sh
