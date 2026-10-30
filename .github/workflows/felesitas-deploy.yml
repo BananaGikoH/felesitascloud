@@ -30,16 +30,18 @@ jobs:
     environment: aeronavis
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: felesitas
           sparse-checkout: felesitas
 
-      - uses: tailscale/github-action@v3
+      - uses: tailscale/github-action@v4.2.0
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
+          version: 1.104.4
+          ping: 100.66.5.56
 
       - name: SSH の準備
         env:
@@ -68,16 +70,18 @@ jobs:
       url: https://felesitas.cloud
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: felesitas
           sparse-checkout: felesitas
 
-      - uses: tailscale/github-action@v3
+      - uses: tailscale/github-action@v4.2.0
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
+          version: 1.104.4
+          ping: 100.70.84.24
 
       - name: SSH の準備
         env:
