@@ -4,6 +4,8 @@
 # Environments「production」の承認を待ってから本番へ適用する。
 # GitHub のランナーは Tailscale(tag:ci)で一時的に tailnet へ入り、
 # ACL で許された tag:mastodon の SSH(22番)だけに入る。
+# 宛先は tailnet の固定IP(ランナーでは MagicDNS の名前が引けなかったため)、
+# ホスト鍵の照合は名前(HostKeyAlias)で行う。
 name: felesitas deploy
 
 on:
@@ -54,7 +56,7 @@ jobs:
           REF: ${{ inputs.ref }}
         run: |
           [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
-          ssh -o StrictHostKeyChecking=yes root@aeronavis.taild6778a.ts.net \
+          ssh -o StrictHostKeyChecking=yes -o HostKeyAlias=aeronavis.taild6778a.ts.net root@100.66.5.56 \
             'bash -s' -- "$REF" < felesitas/deploy.sh
 
   production:
@@ -92,5 +94,5 @@ jobs:
           REF: ${{ inputs.ref }}
         run: |
           [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
-          ssh -o StrictHostKeyChecking=yes root@felesitas-prod.taild6778a.ts.net \
+          ssh -o StrictHostKeyChecking=yes -o HostKeyAlias=felesitas-prod.taild6778a.ts.net root@100.70.84.24 \
             'bash -s' -- "$REF" < felesitas/deploy.sh
