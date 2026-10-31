@@ -2,6 +2,9 @@
 #
 # Actions の「Run workflow」から動かす。aeronavis(検証環境)へ適用して確認し、
 # Environments「production」の承認を待ってから本番へ適用する。
+# 「公式のタグ」を書いた時は、先に felesitas ブランチをそのタグの上へ載せ直して
+# push してから進む(空なら載せ直さず、ref をそのまま適用する)。
+# 本番の版が上がったら、お知らせ用のアカウントで投稿する。
 # GitHub のランナーは Tailscale(tag:ci)で一時的に tailnet へ入り、
 # ACL で許された tag:mastodon の SSH(22番)だけに入る。
 # 宛先は tailnet の固定IP(ランナーでは MagicDNS の名前が引けなかったため)、
@@ -11,8 +14,12 @@ name: felesitas deploy
 on:
   workflow_dispatch:
     inputs:
+      upstream_tag:
+        description: '公式のタグ(例: v4.7.5)。書くと felesitas をその上へ載せ直してから適用する。独自実装だけの反映なら空'
+        required: false
+        default: ''
       ref:
-        description: 'デプロイするブランチ・タグ・コミット'
+        description: 'デプロイするブランチ・タグ・コミット(公式のタグを書いた時は載せ直した felesitas になる)'
         required: true
         default: felesitas
 
@@ -24,8 +31,80 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  rebase:
+    name: 公式の版へ載せ直す
+    if: inputs.upstream_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      sha: ${{ steps.rebase.outputs.sha }}
+    steps:
+      # ワークフローのファイルを含む push は GITHUB_TOKEN では断られるため、
+      # このフォークの Contents・Workflows だけを書ける PAT を使う
+      - uses: actions/checkout@v5
+        with:
+          ref: felesitas
+          fetch-depth: 0
+          token: ${{ secrets.REBASE_TOKEN }}
+
+      - name: 載せ直して push
+        id: rebase
+        env:
+          TAG: ${{ inputs.upstream_tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "公式のタグの形ではありません: $TAG"; exit 1; }
+          git config user.name BananaGikoH
+          git config user.email 15911592+BananaGikoH@users.noreply.github.com
+          git remote add upstream https://github.com/mastodon/mastodon.git
+          git fetch --quiet upstream 'refs/tags/v*:refs/tags/v*'
+
+          OLD_TAG="$(git describe --tags --abbrev=0 --match 'v*' HEAD)"
+          OLD_SHA="$(git rev-parse HEAD)"
+          echo "今の土台: $OLD_TAG ($OLD_SHA)"
+          echo "新しい土台: $TAG"
+          [[ "$OLD_TAG" != "$TAG" ]] || { echo "すでに $TAG の上に載っています"; exit 1; }
+          [[ "$(printf '%s\n%s\n' "$OLD_TAG" "$TAG" | sort -V | tail -1)" == "$TAG" ]] || { echo "$TAG は今の $OLD_TAG より古い版です"; exit 1; }
+          echo "載せ直す自分のコミット:"
+          git log --oneline "$OLD_TAG..HEAD"
+
+          if ! git rebase --onto "$TAG" "$OLD_TAG"; then
+            echo
+            echo "!! 自分の変更と公式の変更がぶつかりました。push はしていません"
+            echo "!! ぶつかったファイル:"
+            git diff --name-only --diff-filter=U
+            git rebase --abort
+            exit 1
+          fi
+          NEW_SHA="$(git rev-parse HEAD)"
+
+          # 戻せるように、載せ直す前の felesitas をタグで残す
+          git push --quiet origin "$OLD_SHA:refs/tags/felesitas-before-$TAG"
+          git push --force-with-lease="felesitas:$OLD_SHA" origin HEAD:felesitas
+          echo "載せ直しました: $OLD_SHA → $NEW_SHA (前の felesitas はタグ felesitas-before-$TAG)"
+          echo "sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+
+      # 公式のワークフローがこのフォークで動かないよう、自分のもの以外を止め直す
+      # (公式が新しく足したものは、push のあと少し待たないと一覧に出ない)
+      - name: 公式のワークフローを止める
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sleep 15
+          gh workflow list --all --json id,path,state \
+            -q '.[] | select(.state == "active" and .path != ".github/workflows/felesitas-deploy.yml") | "\(.id) \(.path)"' \
+          | while read -r id path; do
+              echo "止める: $path"
+              gh workflow disable "$id"
+            done
+
   aeronavis:
     name: aeronavis へ適用
+    needs: rebase
+    if: ${{ !cancelled() && (needs.rebase.result == 'success' || needs.rebase.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: aeronavis
     timeout-minutes: 60
@@ -55,7 +134,7 @@ jobs:
 
       - name: デプロイ
         env:
-          REF: ${{ inputs.ref }}
+          REF: ${{ needs.rebase.outputs.sha || inputs.ref }}
         run: |
           [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
           ssh -o StrictHostKeyChecking=yes -o HostKeyAlias=aeronavis.taild6778a.ts.net root@100.66.5.56 \
@@ -63,7 +142,8 @@ jobs:
 
   production:
     name: 本番へ適用
-    needs: aeronavis
+    needs: [rebase, aeronavis]
+    if: ${{ !cancelled() && needs.aeronavis.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -74,6 +154,10 @@ jobs:
         with:
           ref: felesitas
           sparse-checkout: felesitas
+
+      - name: 今の版
+        id: before
+        run: echo "version=$(curl -fsS https://felesitas.cloud/api/v2/instance | jq -r .version)" >> "$GITHUB_OUTPUT"
 
       - uses: tailscale/github-action@v4.2.0
         with:
@@ -95,8 +179,28 @@ jobs:
 
       - name: デプロイ
         env:
-          REF: ${{ inputs.ref }}
+          REF: ${{ needs.rebase.outputs.sha || inputs.ref }}
         run: |
           [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
           ssh -o StrictHostKeyChecking=yes -o HostKeyAlias=felesitas-prod.taild6778a.ts.net root@100.70.84.24 \
             'bash -s' -- "$REF" < felesitas/deploy.sh
+
+      # 版が上がった時だけ、お知らせ用のアカウントで公開投稿する。
+      # 投稿に失敗してもデプロイは成功のまま
+      - name: お知らせを投稿
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.ANNOUNCE_TOKEN }}
+          BEFORE: ${{ steps.before.outputs.version }}
+        run: |
+          AFTER="$(curl -fsS https://felesitas.cloud/api/v2/instance | jq -r .version)"
+          echo "前: $BEFORE / 後: $AFTER"
+          if [[ -z "$TOKEN" ]]; then echo "ANNOUNCE_TOKEN が無いので投稿しません"; exit 0; fi
+          if [[ -z "$AFTER" || "$AFTER" == "$BEFORE" ]]; then echo "版は変わっていないので投稿しません"; exit 0; fi
+          TEXT="felesitas.cloud を Mastodon v$AFTER にアップデートしました。"$'\n\n'"公式の変更点: https://github.com/mastodon/mastodon/releases/tag/v$AFTER"
+          curl -fsS -o /dev/null -w '投稿しました(HTTP %{http_code})\n' -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Idempotency-Key: felesitas-update-$AFTER" \
+            --data-urlencode "status=$TEXT" \
+            --data-urlencode visibility=public \
+            https://felesitas.cloud/api/v1/statuses
