@@ -18,8 +18,8 @@ on:
       visibility:
         description: '公開範囲'
         type: choice
-        options: [unlisted, public, private]
-        default: unlisted
+        options: [public, unlisted, private]
+        default: public
 
 permissions:
   contents: read
