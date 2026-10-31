@@ -1,0 +1,56 @@
+# お知らせ用のアカウント(bot)の試し投稿
+#
+# Actions の「Run workflow」から、トークンと投稿の仕組みが動くかを確かめる。
+name: felesitas announce test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '投稿する先'
+        type: choice
+        options: [aeronavis, production, both]
+        default: aeronavis
+      text:
+        description: '文面'
+        required: true
+        default: 'お知らせ用アカウントの試し投稿です。'
+      visibility:
+        description: '公開範囲'
+        type: choice
+        options: [unlisted, public, private]
+        default: unlisted
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    name: 試し投稿
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: felesitas
+          sparse-checkout: felesitas
+
+      - name: aeronavis
+        if: inputs.target != 'production'
+        env:
+          TOKEN: ${{ secrets.AERONAVIS_ANNOUNCE_TOKEN }}
+          TEXT: ${{ inputs.text }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          [[ -n "$TOKEN" ]] || { echo "AERONAVIS_ANNOUNCE_TOKEN がありません"; exit 1; }
+          bash felesitas/announce.sh aeronavis.felesitas.cloud
+
+      - name: 本番
+        if: inputs.target != 'aeronavis'
+        env:
+          TOKEN: ${{ secrets.ANNOUNCE_TOKEN }}
+          TEXT: ${{ inputs.text }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          [[ -n "$TOKEN" ]] || { echo "ANNOUNCE_TOKEN がありません"; exit 1; }
+          bash felesitas/announce.sh felesitas.cloud

@@ -4,7 +4,7 @@
 # Environments「production」の承認を待ってから本番へ適用する。
 # 「公式のタグ」を書いた時は、先に felesitas ブランチをそのタグの上へ載せ直して
 # push してから進む(空なら載せ直さず、ref をそのまま適用する)。
-# 本番の版が上がったら、お知らせ用のアカウントで投稿する。
+# 版が上がったら、aeronavis・本番それぞれのお知らせ用のアカウントで投稿する。
 # GitHub のランナーは Tailscale(tag:ci)で一時的に tailnet へ入り、
 # ACL で許された tag:mastodon の SSH(22番)だけに入る。
 # 宛先は tailnet の固定IP(ランナーでは MagicDNS の名前が引けなかったため)、
@@ -95,7 +95,7 @@ jobs:
         run: |
           sleep 15
           gh workflow list --all --json id,path,state \
-            -q '.[] | select(.state == "active" and .path != ".github/workflows/felesitas-deploy.yml") | "\(.id) \(.path)"' \
+            -q '.[] | select(.state == "active" and (.path | startswith(".github/workflows/felesitas-") | not)) | "\(.id) \(.path)"' \
           | while read -r id path; do
               echo "止める: $path"
               gh workflow disable "$id"
@@ -113,6 +113,10 @@ jobs:
         with:
           ref: felesitas
           sparse-checkout: felesitas
+
+      - name: 今の版
+        id: before
+        run: echo "version=$(curl -fsS https://aeronavis.felesitas.cloud/api/v2/instance | jq -r .version)" >> "$GITHUB_OUTPUT"
 
       - uses: tailscale/github-action@v4.2.0
         with:
@@ -139,6 +143,13 @@ jobs:
           [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "ref に使えない文字があります: $REF"; exit 1; }
           ssh -o StrictHostKeyChecking=yes -o HostKeyAlias=aeronavis.taild6778a.ts.net root@100.66.5.56 \
             'bash -s' -- "$REF" < felesitas/deploy.sh
+
+      # 本番の前に、投稿の仕組みも aeronavis で試しておく
+      - name: お知らせを投稿
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.AERONAVIS_ANNOUNCE_TOKEN }}
+        run: bash felesitas/announce.sh aeronavis.felesitas.cloud "${{ steps.before.outputs.version }}"
 
   production:
     name: 本番へ適用
@@ -191,16 +202,4 @@ jobs:
         continue-on-error: true
         env:
           TOKEN: ${{ secrets.ANNOUNCE_TOKEN }}
-          BEFORE: ${{ steps.before.outputs.version }}
-        run: |
-          AFTER="$(curl -fsS https://felesitas.cloud/api/v2/instance | jq -r .version)"
-          echo "前: $BEFORE / 後: $AFTER"
-          if [[ -z "$TOKEN" ]]; then echo "ANNOUNCE_TOKEN が無いので投稿しません"; exit 0; fi
-          if [[ -z "$AFTER" || "$AFTER" == "$BEFORE" ]]; then echo "版は変わっていないので投稿しません"; exit 0; fi
-          TEXT="felesitas.cloud を Mastodon v$AFTER にアップデートしました。"$'\n\n'"公式の変更点: https://github.com/mastodon/mastodon/releases/tag/v$AFTER"
-          curl -fsS -o /dev/null -w '投稿しました(HTTP %{http_code})\n' -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Idempotency-Key: felesitas-update-$AFTER" \
-            --data-urlencode "status=$TEXT" \
-            --data-urlencode visibility=public \
-            https://felesitas.cloud/api/v1/statuses
+        run: bash felesitas/announce.sh felesitas.cloud "${{ steps.before.outputs.version }}"
